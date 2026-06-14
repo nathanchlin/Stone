@@ -1,0 +1,19 @@
+meta:
+  name: value_with_catalyst
+  version: 0.1.0
+  description: Conservative value plus catalyst strategy skeleton.
+universe:
+  include_boards:
+    - sh_main
+    - sz_main
+factors:
+  - name: roe_above_15
+    weight: 0.4
+  - name: pe_in_industry_percentile
+    weight: 0.4
+  - name: revenue_growth_positive
+    weight: 0.2
+outputs:
+  - markdown
+  - excel
+top_n: 30

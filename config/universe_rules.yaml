@@ -1,0 +1,6 @@
+exclude_st: true
+exclude_new_listing_days: 60
+exclude_paused: true
+exclude_delisting_risk: true
+exclude_beijing_exchange: false
+min_market_cap: 5000000000

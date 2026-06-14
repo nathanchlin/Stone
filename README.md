@@ -32,7 +32,7 @@
 
 ## 项目状态
 
-🚧 **设计阶段** — 选股子系统设计文档已完成，等待实施。
+🚧 **骨架已可运行** — 数据层、选股流水线、4 种报表输出、CLI 骨架、integration/e2e 测试已经落地；当前仍属于本地开发版，尚未做真实全市场数据验证和生产化调优。
 
 详见：[选股子系统设计文档](docs/superpowers/specs/2026-06-14-a-stock-selector-design.md)
 
@@ -78,6 +78,39 @@ stone update
 ## 文档
 
 - [选股子系统设计文档](docs/superpowers/specs/2026-06-14-a-stock-selector-design.md)
+- [实现与部署说明](docs/superpowers/plans/SETUP.md)
+
+## Quickstart
+
+```bash
+# Install
+brew install uv
+git clone https://github.com/nathanchlin/Stone.git
+cd Stone
+uv sync --all-extras
+
+# Configure your capital (private — not committed)
+cp config/position_rules.example.yaml config/personal/position_rules.yaml
+$EDITOR config/personal/position_rules.yaml
+
+# First run: backfill historical data (30-60 min)
+uv run python main.py update --backfill 2024-01-01 2026-06-14
+
+# Run selection
+uv run python main.py select --strategy band_trend_v1
+# -> reports/2026-06-14_band_trend_v1.{xlsx,html,md,json}
+```
+
+## Development
+
+```bash
+uv run pytest -v                  # run tests
+uv run pytest --cov=stone         # coverage report
+uv run ruff check .               # lint
+uv run mypy stone/                # type check
+```
+
+See [SETUP.md](docs/superpowers/plans/SETUP.md) for daily scheduling.
 
 ## License
 

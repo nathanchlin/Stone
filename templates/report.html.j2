@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>选股报告 - {{ result.target_date }} - {{ result.strategy_name }}</title>
+<style>
+body { font-family: -apple-system, sans-serif; margin: 2em; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid #ddd; padding: 8px; }
+th { background: #f5f5f5; }
+.score { font-weight: bold; }
+.disclaimer { background: #fff4e5; padding: 1em; border-left: 4px solid #ffa500; }
+</style>
+</head>
+<body>
+<header>
+<h1>选股报告</h1>
+<p>策略: {{ result.strategy_name }} · 日期: {{ result.target_date }} · Top {{ result.final_picks|length }}</p>
+</header>
+
+<section id="summary">
+<p>股池: {{ result.universe_size }} → 评分: {{ result.scored_size }} → 过滤: {{ result.passed_size }} → 最终: {{ result.final_picks|length }}</p>
+</section>
+
+<section id="picks">
+<table id="picks-table">
+<thead><tr>
+<th>#</th><th>代码</th><th>名称</th><th>行业</th><th>评分</th><th>建议金额</th><th>建议股数</th><th>入选理由</th>
+</tr></thead>
+<tbody>
+{% for s in result.final_picks %}
+<tr>
+<td>{{ loop.index }}</td>
+<td>{{ s.code }}</td>
+<td>{{ s.name }}</td>
+<td>{{ s.industry }}</td>
+<td class="score">{{ "%.1f"|format(s.score) }}</td>
+{% if loop.index0 < result.position_plans|length %}
+<td>¥{{ "{:,.0f}".format(result.position_plans[loop.index0].amount) }}</td>
+<td>{{ result.position_plans[loop.index0].shares }}</td>
+{% else %}
+<td>-</td><td>-</td>
+{% endif %}
+<td>{% for k, v in s.normalized_values.items() if v >= 80 %}{{ k }}{% if not loop.last %} + {% endif %}{% endfor %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</section>
+
+{% if result.failed_codes %}
+<section id="failed">
+<h3>失败股票 ({{ result.failed_codes|length }} 只)</h3>
+<details><summary>查看详情</summary>
+<ul>{% for code, reason in result.failed_codes %}<li>{{ code }}: {{ reason }}</li>{% endfor %}</ul>
+</details>
+</section>
+{% endif %}
+
+<p class="disclaimer">⚠️ 本报告仅为按预设规则的算法计算结果，<strong>非投资建议</strong>。买卖决策请自行判断。</p>
+</body>
+</html>

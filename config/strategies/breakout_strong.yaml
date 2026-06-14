@@ -1,0 +1,19 @@
+meta:
+  name: breakout_strong
+  version: 0.1.0
+  description: Aggressive breakout strategy skeleton.
+universe:
+  include_boards:
+    - sh_main
+    - sz_main
+    - chinext
+factors:
+  - name: breakout_20d_high
+    weight: 0.5
+  - name: main_money_inflow_5d
+    weight: 0.3
+  - name: industry_momentum_5d
+    weight: 0.2
+outputs:
+  - markdown
+top_n: 20

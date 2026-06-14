@@ -1,0 +1,23 @@
+meta:
+  name: band_trend_v1
+  version: 0.1.0
+  description: Default swing-trend strategy skeleton.
+universe:
+  include_boards:
+    - sh_main
+    - sz_main
+    - chinext
+    - star
+    - bse
+  exclude_st: true
+factors:
+  - name: ma_bullish_alignment
+    weight: 0.4
+  - name: volume_ratio
+    weight: 0.3
+  - name: revenue_growth_positive
+    weight: 0.3
+outputs:
+  - markdown
+  - json
+top_n: 30
