@@ -50,3 +50,10 @@ def test_mixed_industries():
     ]
     result = solver.apply(ranked)
     assert len(result) == 4
+
+
+def test_unknown_industry_is_not_artificially_capped():
+    solver = ConstraintSolver(Constraints(max_per_industry=1, max_per_theme=100))
+    ranked = [_score(f"c{i}", "unknown", 100 - i) for i in range(3)]
+    result = solver.apply(ranked)
+    assert len(result) == 3

@@ -16,7 +16,11 @@ class ConstraintSolver:
         counts: dict[str, int] = defaultdict(int)
         result: list[StockScore] = []
         for stock in ranked:
-            if counts[stock.industry] < self.config.max_per_industry:
+            industry = stock.industry.strip() if stock.industry else ""
+            if industry in {"", "unknown"}:
                 result.append(stock)
-                counts[stock.industry] += 1
+                continue
+            if counts[industry] < self.config.max_per_industry:
+                result.append(stock)
+                counts[industry] += 1
         return result

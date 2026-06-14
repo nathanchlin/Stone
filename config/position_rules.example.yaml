@@ -1,3 +1,7 @@
-capital_base: 100000
-max_single_position_pct: 0.1
-max_total_positions: 10
+total_capital: 100000
+max_total_position: 0.8
+max_per_stock: 0.1
+allocation_method: equal_weight
+round_to: 100
+stop_loss_pct: 0.08
+take_profit_pct: 0.2

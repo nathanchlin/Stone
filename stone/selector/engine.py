@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date
 
+import pandas as pd
 from tqdm import tqdm
 
 from stone.data.cache.parquet_store import ParquetStore
@@ -58,6 +59,19 @@ class SelectionEngine:
         self.position_sizer = PositionSizer(position_rules) if position_rules else None
         self.filters = strategy.filters
         self.failed_codes: list[tuple[str, str]] = []
+        self._universe_snapshot = None
+
+    def _load_latest_snapshot(self, kind: str, target_date: date):
+        df = self.store.read(kind, target_date)
+        if not df.empty:
+            return df
+
+        for cached_date in reversed(self.store.list_cached_dates(kind)):
+            if cached_date <= target_date:
+                snapshot = self.store.read(kind, cached_date)
+                if not snapshot.empty:
+                    return snapshot
+        return df
 
     def run(self, target_date: date) -> SelectionResult:
         log.info("开始选股，target_date=%s", target_date)
@@ -91,6 +105,7 @@ class SelectionEngine:
         df = self.store.read("universe", target_date)
         if df.empty:
             df = self.fetcher.list_universe(target_date)
+        self._universe_snapshot = df.copy() if not df.empty else None
         if df.empty:
             return []
         return df["code"].astype(str).tolist()
@@ -135,19 +150,30 @@ class SelectionEngine:
         kline = kline_df[kline_df["code"] == code].drop(columns=["_cache_date"], errors="ignore")
         if kline.empty:
             return None
+        kline = kline.sort_values("date").reset_index(drop=True)
 
-        financial = self.store.read("financial", target_date)
+        financial = self._load_latest_snapshot("financial", target_date)
         if not financial.empty and "code" in financial.columns:
             financial = financial[financial["code"].astype(str) == code]
 
-        moneyflow = self.store.read("moneyflow", target_date)
+        moneyflow = self._load_latest_snapshot("moneyflow", target_date)
         if not moneyflow.empty and "code" in moneyflow.columns:
             moneyflow = moneyflow[moneyflow["code"].astype(str) == code]
 
+        name = code
+        industry = "unknown"
+        if self._universe_snapshot is not None and not self._universe_snapshot.empty:
+            meta = self._universe_snapshot[self._universe_snapshot["code"].astype(str) == code]
+            if not meta.empty:
+                if "name" in meta.columns:
+                    name = str(meta.iloc[0]["name"])
+                if "industry" in meta.columns and pd.notna(meta.iloc[0]["industry"]):
+                    industry = str(meta.iloc[0]["industry"])
+
         return FactorContext(
             code=code,
-            name=code,
-            industry="unknown",
+            name=name,
+            industry=industry,
             today=target_date,
             kline=kline,
             financial=financial,

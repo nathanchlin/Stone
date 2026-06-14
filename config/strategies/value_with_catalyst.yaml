@@ -7,11 +7,11 @@ universe:
     - sh_main
     - sz_main
 factors:
-  - name: roe_above_15
+  - name: ma_bullish_alignment
     weight: 0.4
-  - name: pe_in_industry_percentile
+  - name: rsi_in_healthy_zone
     weight: 0.4
-  - name: revenue_growth_positive
+  - name: distance_to_52w_high
     weight: 0.2
 outputs:
   - markdown

@@ -13,9 +13,9 @@ universe:
 factors:
   - name: ma_bullish_alignment
     weight: 0.4
-  - name: volume_ratio
+  - name: price_above_ma60
     weight: 0.3
-  - name: revenue_growth_positive
+  - name: volume_ratio
     weight: 0.3
 outputs:
   - markdown

@@ -31,19 +31,27 @@ def update(retry_failed: bool, backfill: tuple[str, str] | None) -> None:
     setup_logging()
     store = ParquetStore(Path("data_cache"))
     fetcher = AkshareFetcher()
-    updater = IncrementalUpdater(store=store, fetcher=fetcher)
-
     if backfill:
-        _, end = backfill
-        target = date.fromisoformat(end)
+        start_str, end_str = backfill
+        start = date.fromisoformat(start_str)
+        end = date.fromisoformat(end_str)
+        updater = IncrementalUpdater(store=store, fetcher=fetcher, lookback_days=0)
+        calendar = fetcher.get_trade_calendar(start, end)
+        success = failed = skipped = 0
+        for target in calendar:
+            report = updater.update_daily(target)
+            success += len(report.success_dates)
+            failed += len(report.failed_dates)
+            skipped += len(report.skipped_dates)
+            click.echo(report.summary())
+        click.echo(f"Backfill done: success={success} failed={failed} skipped={skipped}")
     else:
+        updater = IncrementalUpdater(store=store, fetcher=fetcher, lookback_days=0)
         target = date.today()
-
-    if retry_failed:
-        click.echo("retry_failed=true")
-
-    report = updater.update_daily(target)
-    click.echo(report.summary())
+        if retry_failed:
+            click.echo("retry_failed=true")
+        report = updater.update_daily(target)
+        click.echo(report.summary())
 
 
 @app.command()
@@ -62,6 +70,7 @@ def select(
     from stone.reporters.json_reporter import JsonReporter
     from stone.reporters.markdown import MarkdownReporter
     from stone.selector.engine import SelectionEngine
+    from stone.selector.position_sizing import PositionRules
 
     setup_logging()
     target = date.fromisoformat(target_date) if target_date else date.today()
@@ -81,13 +90,24 @@ def select(
     store = ParquetStore(Path("data_cache"))
     fetcher = AkshareFetcher()
     out_dir = Path(report_dir)
+    position_rules = None
+    personal_rules = Path("config/personal/position_rules.yaml")
+    if personal_rules.exists():
+        position_rules = PositionRules.from_yaml(personal_rules)
 
     for strategy_file in files:
         click.echo(f"Running strategy: {strategy_file.stem}")
         config = load_strategy(strategy_file)
-        engine = SelectionEngine(strategy=config, store=store, fetcher=fetcher)
+        engine = SelectionEngine(
+            strategy=config,
+            store=store,
+            fetcher=fetcher,
+            position_rules=position_rules,
+        )
         result = engine.run(target)
         click.echo(result.summary())
+        if not result.final_picks:
+            click.echo("No picks produced. Check cached data completeness and factor/filter settings.")
 
         JsonReporter().render(result, out_dir)
         MarkdownReporter().render(result, out_dir)

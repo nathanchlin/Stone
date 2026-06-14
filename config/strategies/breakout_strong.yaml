@@ -10,9 +10,9 @@ universe:
 factors:
   - name: breakout_20d_high
     weight: 0.5
-  - name: main_money_inflow_5d
+  - name: volume_ratio
     weight: 0.3
-  - name: industry_momentum_5d
+  - name: distance_to_52w_high
     weight: 0.2
 outputs:
   - markdown

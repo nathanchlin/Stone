@@ -91,3 +91,21 @@ def test_stop_loss_take_profit_prices():
     plans = PositionSizer(rules).allocate(_picks(1), close_prices=[10.0])
     assert plans[0].stop_loss_price == pytest.approx(9.2)
     assert plans[0].take_profit_price == pytest.approx(12.0)
+
+
+def test_legacy_position_rules_yaml_keys_are_accepted(tmp_path):
+    rules_file = tmp_path / "position_rules.yaml"
+    rules_file.write_text(
+        "\n".join(
+            [
+                "capital_base: 100000",
+                "max_single_position_pct: 0.1",
+                "max_total_positions: 8",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    rules = PositionRules.from_yaml(rules_file)
+    assert rules.total_capital == 100000
+    assert rules.max_per_stock == 0.1
+    assert rules.max_total_position == pytest.approx(0.8)

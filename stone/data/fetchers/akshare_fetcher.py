@@ -1,6 +1,7 @@
 """Akshare-backed implementation of the data fetcher protocol."""
 
 from datetime import date
+from json import JSONDecodeError
 
 import pandas as pd
 
@@ -16,12 +17,24 @@ except ImportError:  # pragma: no cover - handled at runtime in environments wit
 
 _KLINE_RENAME = {
     "日期": "date",
+    "股票代码": "code",
     "开盘": "open",
     "最高": "high",
     "最低": "low",
     "收盘": "close",
     "成交量": "volume",
     "成交额": "amount",
+    "换手率": "turnover_rate",
+}
+
+_FINANCIAL_RENAME_CANDIDATES = {
+    "roe": ["净资产收益率(%)", "加权净资产收益率(%)"],
+    "revenue_yoy": ["主营业务收入增长率(%)", "营业收入增长率(%)"],
+}
+
+_MONEYFLOW_RENAME_CANDIDATES = {
+    "main_net": ["主力净流入-净额", "主力净流入净额", "主力净流入"],
+    "north_net": ["北向资金净流入", "北向净流入", "陆股通净流入"],
 }
 
 
@@ -35,6 +48,46 @@ class AkshareFetcher:
         if ak is None:
             raise DataError("akshare is not installed")
         return ak
+
+    def _normalize_financial(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame(columns=["date", "roe", "revenue_yoy"])
+
+        normalized = pd.DataFrame()
+        if "日期" in df.columns:
+            normalized["date"] = pd.to_datetime(df["日期"], errors="coerce").dt.date
+
+        for target, candidates in _FINANCIAL_RENAME_CANDIDATES.items():
+            for candidate in candidates:
+                if candidate in df.columns:
+                    normalized[target] = pd.to_numeric(df[candidate], errors="coerce")
+                    break
+
+        for required in ["roe", "revenue_yoy"]:
+            if required not in normalized.columns:
+                normalized[required] = pd.Series(dtype=float)
+
+        if "date" not in normalized.columns:
+            normalized["date"] = pd.Series(dtype=object)
+
+        return normalized[["date", "roe", "revenue_yoy"]]
+
+    def _normalize_moneyflow(self, df: pd.DataFrame) -> pd.DataFrame:
+        normalized = pd.DataFrame(columns=["main_net", "north_net"])
+        if df.empty:
+            return normalized
+
+        for target, candidates in _MONEYFLOW_RENAME_CANDIDATES.items():
+            for candidate in candidates:
+                if candidate in df.columns:
+                    normalized[target] = pd.to_numeric(df[candidate], errors="coerce")
+                    break
+
+        for required in ["main_net", "north_net"]:
+            if required not in normalized.columns:
+                normalized[required] = pd.Series(dtype=float)
+
+        return normalized[["main_net", "north_net"]]
 
     @with_retry()
     def list_universe(self, target_date: date) -> pd.DataFrame:
@@ -62,22 +115,32 @@ class AkshareFetcher:
         if df.empty:
             raise DataError(f"Empty kline for {code} from {start} to {end}")
         renamed = df.rename(columns=_KLINE_RENAME)
-        canonical = renamed[["date", "open", "high", "low", "close", "volume", "amount"]].copy()
+        canonical_columns = ["date", "open", "high", "low", "close", "volume", "amount"]
+        if "turnover_rate" in renamed.columns:
+            canonical_columns.append("turnover_rate")
+        canonical = renamed[canonical_columns].copy()
         canonical["date"] = pd.to_datetime(canonical["date"]).dt.date
+        canonical = canonical.sort_values("date").reset_index(drop=True)
         return canonical
 
     @with_retry()
     def get_basic_financial(self, code: str) -> pd.DataFrame:
         self._limiter.acquire()
         client = self._require_client()
-        return client.stock_financial_analysis_indicator(symbol=code.zfill(6))
+        start_year = str(max(date.today().year - 5, 2000))
+        raw = client.stock_financial_analysis_indicator(symbol=code.zfill(6), start_year=start_year)
+        return self._normalize_financial(raw)
 
     @with_retry()
     def get_money_flow(self, code: str, days: int = 30) -> pd.DataFrame:
         self._limiter.acquire()
         client = self._require_client()
         market = "sh" if code.startswith(("6", "9")) else "sz"
-        return client.stock_individual_fund_flow(stock=code, market=market).tail(days)
+        try:
+            raw = client.stock_individual_fund_flow(stock=code, market=market)
+        except (ConnectionError, TimeoutError, JSONDecodeError):
+            return pd.DataFrame(columns=["main_net", "north_net"])
+        return self._normalize_moneyflow(raw.tail(days))
 
     @with_retry()
     def get_industry_mapping(self) -> dict[str, str]:

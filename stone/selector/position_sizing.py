@@ -21,6 +21,28 @@ class PositionRules(BaseModel):
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
 
+    @classmethod
+    def _normalize_legacy_keys(cls, raw: dict) -> dict:
+        remapped = dict(raw)
+        if "capital_base" in remapped and "total_capital" not in remapped:
+            remapped["total_capital"] = remapped.pop("capital_base")
+        if "max_single_position_pct" in remapped and "max_per_stock" not in remapped:
+            remapped["max_per_stock"] = remapped.pop("max_single_position_pct")
+        if "max_total_positions" in remapped and "max_total_position" not in remapped:
+            max_positions = remapped.pop("max_total_positions")
+            if isinstance(max_positions, (int, float)) and max_positions > 0:
+                remapped["max_total_position"] = min(
+                    1.0,
+                    float(max_positions) * float(remapped.get("max_per_stock", 0.1)),
+                )
+        return remapped
+
+    @classmethod
+    def model_validate(cls, obj, *args, **kwargs):
+        if isinstance(obj, dict):
+            obj = cls._normalize_legacy_keys(obj)
+        return super().model_validate(obj, *args, **kwargs)
+
     @field_validator("allocation_method")
     @classmethod
     def method_must_be_supported(cls, value: str) -> str:
@@ -30,7 +52,8 @@ class PositionRules(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: Path | str) -> "PositionRules":
-        return cls(**yaml.safe_load(Path(path).read_text(encoding="utf-8")))
+        raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        return cls.model_validate(raw)
 
 
 @dataclass
