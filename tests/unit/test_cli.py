@@ -18,6 +18,7 @@ def test_cli_list_strategies():
     result = runner.invoke(app, ["list-strategies"])
     assert result.exit_code == 0
     assert "band_trend_v1" in result.output
+    assert "starter_small_capital_v1" in result.output
 
 
 def test_cli_validate_config_accepts_valid_file():

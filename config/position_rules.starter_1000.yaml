@@ -1,0 +1,8 @@
+total_capital: 1000
+max_total_position: 0.8
+max_per_stock: 0.5
+allocation_method: equal_weight
+round_to: 100
+min_position: 300
+stop_loss_pct: 0.05
+take_profit_pct: 0.12

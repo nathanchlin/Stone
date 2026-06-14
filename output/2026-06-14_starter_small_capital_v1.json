@@ -1,0 +1,118 @@
+{
+  "meta": {
+    "strategy_name": "starter_small_capital_v1",
+    "target_date": "2026-06-14",
+    "stone_version": "0.1.0"
+  },
+  "summary": {
+    "universe_size": 25,
+    "scored_size": 0,
+    "passed_size": 0,
+    "top_n": 0,
+    "failed_count": 25
+  },
+  "picks": [],
+  "position_plans": [],
+  "failed": [
+    {
+      "code": "000725",
+      "reason": "missing data"
+    },
+    {
+      "code": "603993",
+      "reason": "missing data"
+    },
+    {
+      "code": "300059",
+      "reason": "missing data"
+    },
+    {
+      "code": "600667",
+      "reason": "missing data"
+    },
+    {
+      "code": "002602",
+      "reason": "missing data"
+    },
+    {
+      "code": "600703",
+      "reason": "missing data"
+    },
+    {
+      "code": "000100",
+      "reason": "missing data"
+    },
+    {
+      "code": "002129",
+      "reason": "missing data"
+    },
+    {
+      "code": "002185",
+      "reason": "missing data"
+    },
+    {
+      "code": "600396",
+      "reason": "missing data"
+    },
+    {
+      "code": "600601",
+      "reason": "missing data"
+    },
+    {
+      "code": "002354",
+      "reason": "missing data"
+    },
+    {
+      "code": "601688",
+      "reason": "missing data"
+    },
+    {
+      "code": "600500",
+      "reason": "missing data"
+    },
+    {
+      "code": "000630",
+      "reason": "missing data"
+    },
+    {
+      "code": "601991",
+      "reason": "missing data"
+    },
+    {
+      "code": "601600",
+      "reason": "missing data"
+    },
+    {
+      "code": "300263",
+      "reason": "missing data"
+    },
+    {
+      "code": "600186",
+      "reason": "missing data"
+    },
+    {
+      "code": "600711",
+      "reason": "missing data"
+    },
+    {
+      "code": "002361",
+      "reason": "missing data"
+    },
+    {
+      "code": "300131",
+      "reason": "missing data"
+    },
+    {
+      "code": "600110",
+      "reason": "missing data"
+    },
+    {
+      "code": "601211",
+      "reason": "missing data"
+    },
+    {
+      "code": "600172",
+      "reason": "missing data"
+    }
+  ]
+}

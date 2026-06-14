@@ -199,3 +199,143 @@ def test_build_context_uses_latest_available_financial_snapshot(tmp_path):
     assert ctx is not None
     assert not ctx.financial.empty
     assert ctx.financial.iloc[0]["roe"] == 18.0
+
+
+def test_load_universe_applies_rules_file(tmp_path):
+    from stone.selector.factors import register_factor
+    from stone.selector.factors.base import Factor
+    from stone.selector.strategy import (
+        Constraints,
+        Meta,
+        OutputConfig,
+        Scoring,
+        ScoringFactor,
+        Strategy,
+        UniverseConfig,
+    )
+
+    @register_factor
+    class _StubUniverse(Factor):
+        name = "_stub_universe_test"
+        category = "technical"
+        higher_is_better = True
+
+        def compute(self, ctx):
+            return 1.0
+
+        def get_params(self):
+            return {}
+
+    rules_file = tmp_path / "rules.yaml"
+    rules_file.write_text(
+        "\n".join(
+            [
+                "include_boards:",
+                "  - sh_main",
+                "exclude_st: true",
+                "exclude_new_listing_days: 250",
+                "exclude_paused: true",
+                "exclude_delisting_risk: true",
+                "exclude_beijing_exchange: true",
+                "min_market_cap: 8000000000",
+                "min_price: 5.0",
+                "min_avg_amount: 200000000",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    strategy = Strategy(
+        meta=Meta(name="test", version="1.0.0", created_at=date(2026, 6, 14)),
+        universe=UniverseConfig(rules_file=rules_file, history_days=60),
+        filters=[],
+        scoring=Scoring(factors=[ScoringFactor(factor="_stub_universe_test", weight=1.0)]),
+        output=OutputConfig(top_n=5, min_score=0.0),
+        constraints=Constraints(max_per_industry=10, max_per_theme=10),
+    )
+
+    store = ParquetStore(tmp_path)
+    target = date(2026, 6, 14)
+    store.write(
+        "universe",
+        target,
+        pd.DataFrame(
+            {
+                "code": ["600519", "830001", "600666"],
+                "name": ["贵州茅台", "永顺生物", "退市测试"],
+                "board": ["sh_main", "bse", "sh_main"],
+                "is_st": [False, False, False],
+                "is_paused": [False, False, False],
+                "list_date": [date(2001, 8, 27), date(2026, 5, 1), date(2015, 1, 1)],
+                "market_cap": [2e11, 3e9, 9e9],
+                "close": [1700.0, 8.0, 3.0],
+                "avg_amount": [8e8, 5e7, 1e8],
+            }
+        ),
+    )
+
+    engine = SelectionEngine(strategy=strategy, store=store, fetcher=MagicMock())
+    codes = engine._load_universe(target)
+
+    assert codes == ["600519"]
+
+
+def test_build_context_fetches_and_caches_kline_when_store_is_empty(tmp_path):
+    from stone.selector.factors import register_factor
+    from stone.selector.factors.base import Factor
+    from stone.selector.strategy import (
+        Constraints,
+        Meta,
+        OutputConfig,
+        Scoring,
+        ScoringFactor,
+        Strategy,
+        UniverseConfig,
+    )
+
+    @register_factor
+    class _StubLiveFetch(Factor):
+        name = "_stub_live_fetch_test"
+        category = "technical"
+        higher_is_better = True
+
+        def compute(self, ctx):
+            return 1.0
+
+        def get_params(self):
+            return {}
+
+    strategy = Strategy(
+        meta=Meta(name="test", version="1.0.0", created_at=date(2026, 6, 14)),
+        universe=UniverseConfig(rules_file=tmp_path / "rules.yaml", history_days=60),
+        filters=[],
+        scoring=Scoring(factors=[ScoringFactor(factor="_stub_live_fetch_test", weight=1.0)]),
+        output=OutputConfig(top_n=5, min_score=0.0),
+        constraints=Constraints(max_per_industry=10, max_per_theme=10),
+    )
+
+    store = ParquetStore(tmp_path)
+    target = date(2026, 6, 14)
+    store.write("universe", target, pd.DataFrame({"code": ["c1"], "name": ["测试股"]}))
+
+    hist = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-03-01", periods=80, freq="D").date,
+            "open": [10.0 + i * 0.1 for i in range(80)],
+            "high": [10.5 + i * 0.1 for i in range(80)],
+            "low": [9.5 + i * 0.1 for i in range(80)],
+            "close": [10.2 + i * 0.1 for i in range(80)],
+            "volume": [1000 + i for i in range(80)],
+            "amount": [10000.0 + i * 100 for i in range(80)],
+        }
+    )
+
+    fetcher = MagicMock()
+    fetcher.get_daily_kline.return_value = hist
+    engine = SelectionEngine(strategy=strategy, store=store, fetcher=fetcher)
+    engine._load_universe(target)
+
+    ctx = engine._build_context("c1", target)
+
+    assert ctx is not None
+    assert len(ctx.kline) == 80
+    assert store.list_cached_dates("kline")

@@ -55,6 +55,7 @@ exclude_delisting_risk: true
 exclude_beijing_exchange: true
 min_market_cap: 8000000000
 min_price: 5.0
+max_price: 20.0
 min_avg_amount: 200000000
 """
     path = tmp_path / "rules.yaml"
@@ -65,6 +66,7 @@ min_avg_amount: 200000000
     assert rules.exclude_new_listing_days == 250
     assert rules.min_market_cap == 8_000_000_000
     assert rules.min_price == 5.0
+    assert rules.max_price == 20.0
     assert rules.min_avg_amount == 200_000_000
 
 
@@ -88,3 +90,29 @@ def test_basic_pool_filters_out_bse_delisting_smallcap_and_illiquid():
     assert "830001" not in codes
     assert "ST001" not in codes
     assert "600666" not in codes
+
+
+def test_starter_pool_filters_out_high_price_names():
+    rules = UniverseRules(
+        include_boards=["sh_main", "sz_main", "chinext"],
+        exclude_st=True,
+        exclude_new_listing_days=250,
+        exclude_paused=True,
+        exclude_delisting_risk=True,
+        exclude_beijing_exchange=True,
+        min_market_cap=5_000_000_000,
+        min_price=3.0,
+        max_price=20.0,
+        min_avg_amount=100_000_000,
+    )
+    codes = get_active_universe(_make_universe_df(), date(2026, 6, 14), rules)
+    assert "600519" not in codes
+    assert "688001" not in codes
+    assert "000001" in codes
+    assert "300001" in codes
+
+
+def test_top_by_avg_amount_keeps_most_liquid_names():
+    rules = UniverseRules(top_by_avg_amount=2)
+    codes = get_active_universe(_make_universe_df(), date(2026, 6, 14), rules)
+    assert codes == ["600519", "000001"]

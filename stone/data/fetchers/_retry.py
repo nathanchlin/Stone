@@ -2,10 +2,14 @@
 
 from collections.abc import Callable
 from functools import wraps
+from http.client import RemoteDisconnected
 from json import JSONDecodeError
 from typing import ParamSpec, TypeVar
 
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import Timeout as RequestsTimeout
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from urllib3.exceptions import ProtocolError
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -14,6 +18,10 @@ TRANSIENT_EXCEPTIONS = (
     ConnectionError,
     TimeoutError,
     JSONDecodeError,
+    RemoteDisconnected,
+    RequestsConnectionError,
+    RequestsTimeout,
+    ProtocolError,
 )
 
 

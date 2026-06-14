@@ -16,7 +16,7 @@ def test_cli_help_runs():
     assert "update" in result.stdout
 
 
-def test_cli_list_strategies_lists_three_files():
+def test_cli_list_strategies_lists_expected_files():
     result = subprocess.run(
         [sys.executable, "main.py", "list-strategies"],
         capture_output=True,
@@ -26,6 +26,7 @@ def test_cli_list_strategies_lists_three_files():
     assert result.returncode == 0
     assert "band_trend_v1" in result.stdout
     assert "breakout_strong" in result.stdout
+    assert "starter_small_capital_v1" in result.stdout
     assert "value_with_catalyst" in result.stdout
 
 

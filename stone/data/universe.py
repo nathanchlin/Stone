@@ -19,7 +19,9 @@ class UniverseRules(BaseModel):
     exclude_beijing_exchange: bool = False
     min_market_cap: float | None = None
     min_price: float | None = None
+    max_price: float | None = None
     min_avg_amount: float | None = None
+    top_by_avg_amount: int | None = None
 
     @classmethod
     def from_yaml(cls, path: Path | str) -> "UniverseRules":
@@ -62,7 +64,13 @@ def get_active_universe(raw: pd.DataFrame, target_date: date, rules: UniverseRul
     if rules.min_price is not None and "close" in df.columns:
         df = df[pd.to_numeric(df["close"], errors="coerce") >= rules.min_price]
 
+    if rules.max_price is not None and "close" in df.columns:
+        df = df[pd.to_numeric(df["close"], errors="coerce") <= rules.max_price]
+
     if rules.min_avg_amount is not None and "avg_amount" in df.columns:
         df = df[pd.to_numeric(df["avg_amount"], errors="coerce") >= rules.min_avg_amount]
+
+    if rules.top_by_avg_amount is not None and rules.top_by_avg_amount > 0 and "avg_amount" in df.columns:
+        df = df.sort_values("avg_amount", ascending=False).head(rules.top_by_avg_amount)
 
     return df["code"].astype(str).tolist() if "code" in df.columns else []

@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from stone.data.cache.parquet_store import ParquetStore
 from stone.data.fetchers.base import DataFetcher
+from stone.data.universe import UniverseRules, get_active_universe
 from stone.selector.constraints import ConstraintSolver
 from stone.selector.criterion import safe_eval_criterion
 from stone.selector.factors.base import FactorContext
@@ -61,6 +62,23 @@ class SelectionEngine:
         self.failed_codes: list[tuple[str, str]] = []
         self._universe_snapshot = None
 
+    def _cache_kline_history(self, code: str, frame: pd.DataFrame) -> None:
+        if frame.empty:
+            return
+
+        payload = frame.copy()
+        payload["code"] = code
+        payload["date"] = pd.to_datetime(payload["date"], errors="coerce").dt.date
+        payload = payload.dropna(subset=["date"])
+        if payload.empty:
+            return
+
+        for target, group in payload.groupby("date"):
+            existing = self.store.read_kline(target)
+            combined = pd.concat([existing, group], ignore_index=True) if not existing.empty else group
+            combined = combined.drop_duplicates(subset=["code"], keep="last")
+            self.store.write_kline(target, combined)
+
     def _load_latest_snapshot(self, kind: str, target_date: date):
         df = self.store.read(kind, target_date)
         if not df.empty:
@@ -105,10 +123,21 @@ class SelectionEngine:
         df = self.store.read("universe", target_date)
         if df.empty:
             df = self.fetcher.list_universe(target_date)
+            if not df.empty:
+                self.store.write("universe", target_date, df)
         self._universe_snapshot = df.copy() if not df.empty else None
         if df.empty:
             return []
-        return df["code"].astype(str).tolist()
+
+        rules_path = self.strategy.universe.rules_file
+        if rules_path.exists():
+            rules = UniverseRules.from_yaml(rules_path)
+        else:
+            rules = UniverseRules(include_boards=list(self.strategy.universe.include_boards))
+        if rules.include_boards and not self.strategy.universe.include_boards:
+            self.strategy.universe.include_boards = list(rules.include_boards)
+        filtered = get_active_universe(df, target_date, rules)
+        return filtered
 
     def _passes_all_filters(self, score: StockScore) -> bool:
         for rule in self.filters:
@@ -144,10 +173,18 @@ class SelectionEngine:
         history = self.strategy.universe.history_days
         start = target_date.fromordinal(target_date.toordinal() - history - 60)
         kline_df = self.store.read_kline_range(start, target_date)
-        if kline_df.empty:
-            return None
-
-        kline = kline_df[kline_df["code"] == code].drop(columns=["_cache_date"], errors="ignore")
+        kline = pd.DataFrame()
+        if not kline_df.empty and "code" in kline_df.columns:
+            kline = kline_df[kline_df["code"] == code].drop(columns=["_cache_date"], errors="ignore")
+        if kline.empty:
+            try:
+                fetched = self.fetcher.get_daily_kline(code, start, target_date)
+            except Exception:  # noqa: BLE001
+                return None
+            if fetched.empty:
+                return None
+            self._cache_kline_history(code, fetched)
+            kline = fetched.copy()
         if kline.empty:
             return None
         kline = kline.sort_values("date").reset_index(drop=True)

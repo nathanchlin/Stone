@@ -90,12 +90,11 @@ class PositionSizer:
         for index, (pick, weight) in enumerate(zip(picks, weights, strict=False)):
             raw_amount = total_budget * weight
             capped = min(raw_amount, per_cap)
-            rounded = (capped // self.rules.round_to) * self.rules.round_to
-            if rounded < self.rules.min_position:
+            price = close_prices[index] if close_prices and index < len(close_prices) else None
+            amount, shares = self._resolve_position(capped, price)
+            if amount < self.rules.min_position or amount <= 0:
                 continue
 
-            price = close_prices[index] if close_prices and index < len(close_prices) else None
-            shares = int(rounded / price) if price else 0
             stop_loss = (
                 price * (1 - self.rules.stop_loss_pct)
                 if price and self.rules.stop_loss_pct
@@ -109,15 +108,25 @@ class PositionSizer:
             plans.append(
                 PositionPlan(
                     code=pick.code,
-                    amount=float(rounded),
+                    amount=float(amount),
                     shares=shares,
-                    pct_of_total=rounded / self.rules.total_capital,
+                    pct_of_total=amount / self.rules.total_capital,
                     stop_loss_price=stop_loss,
                     take_profit_price=take_profit,
                 )
             )
 
         return plans
+
+    def _resolve_position(self, capped: float, price: float | None) -> tuple[float, int]:
+        if price and price > 0:
+            lots = int(capped / price / 100)
+            shares = lots * 100
+            amount = shares * price
+            return float(amount), shares
+
+        rounded = (capped // self.rules.round_to) * self.rules.round_to
+        return float(rounded), 0
 
     def _compute_weights(self, picks: list[StockScore]) -> list[float]:
         method = self.rules.allocation_method

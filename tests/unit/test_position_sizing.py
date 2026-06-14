@@ -93,6 +93,37 @@ def test_stop_loss_take_profit_prices():
     assert plans[0].take_profit_price == pytest.approx(12.0)
 
 
+def test_a_share_positions_use_100_share_lots():
+    rules = PositionRules(
+        total_capital=1000,
+        allocation_method="equal_weight",
+        max_per_stock=0.5,
+        max_total_position=0.8,
+        round_to=100,
+    )
+    plans = PositionSizer(rules).allocate(_picks(2), close_prices=[3.8, 3.9])
+    assert len(plans) == 2
+    assert plans[0].shares == 100
+    assert plans[0].amount == pytest.approx(380.0)
+    assert plans[1].shares == 100
+    assert plans[1].amount == pytest.approx(390.0)
+
+
+def test_skip_position_when_budget_cannot_buy_one_lot():
+    rules = PositionRules(
+        total_capital=1000,
+        allocation_method="equal_weight",
+        max_per_stock=0.4,
+        max_total_position=0.8,
+        round_to=100,
+    )
+    plans = PositionSizer(rules).allocate(_picks(2), close_prices=[12.0, 3.5])
+    assert len(plans) == 1
+    assert plans[0].code == "c1"
+    assert plans[0].shares == 100
+    assert plans[0].amount == pytest.approx(350.0)
+
+
 def test_legacy_position_rules_yaml_keys_are_accepted(tmp_path):
     rules_file = tmp_path / "position_rules.yaml"
     rules_file.write_text(

@@ -1,0 +1,14 @@
+include_boards:
+  - sh_main
+  - sz_main
+  - chinext
+exclude_st: true
+exclude_new_listing_days: 250
+exclude_paused: true
+exclude_delisting_risk: true
+exclude_beijing_exchange: true
+min_market_cap: 5000000000
+min_price: 3.0
+max_price: 20.0
+min_avg_amount: 100000000
+top_by_avg_amount: 25
