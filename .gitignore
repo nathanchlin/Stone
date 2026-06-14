@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+build/
+
+# uv
+.uv/
+
+# 数据缓存（体积大，不入库）
+data_cache/
+_quarantine/
+
+# 输出报表（默认不入库）
+reports/
+
+# 日志
+logs/
+
+# 失败记录
+data_cache/_failed_codes.json
+data_cache/_failed_dates.json
+
+# 敏感信息（重要！绝对不入库）
+.env
+.env.local
+config/personal/
+*.secret
+*.key
+
+# 个人编辑器/系统
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code / 工作目录（不入库）
+.workbuddy/
+.claude/local/
