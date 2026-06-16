@@ -1,5 +1,6 @@
 """Scoring engine based on weighted normalized factor values."""
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -10,6 +11,8 @@ from stone.selector.factors import REGISTRY
 from stone.selector.factors.base import Factor, FactorContext
 from stone.selector.factors.normalize import Normalizer
 from stone.selector.strategy import Scoring
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -51,7 +54,14 @@ class ScoringEngine:
                     higher_is_better=getattr(factor, "higher_is_better", True),
                 )
                 normalized_values[factor.name] = normalized
-            except (FactorError, Exception):
+            except (FactorError, Exception) as exc:
+                log.warning(
+                    "factor %s failed for %s: %s: %s",
+                    factor.name,
+                    ctx.code,
+                    type(exc).__name__,
+                    exc,
+                )
                 raw_values[factor.name] = None
                 normalized_values[factor.name] = 0.0
 

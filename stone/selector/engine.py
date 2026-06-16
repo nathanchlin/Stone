@@ -79,18 +79,6 @@ class SelectionEngine:
             combined = combined.drop_duplicates(subset=["code"], keep="last")
             self.store.write_kline(target, combined)
 
-    def _load_latest_snapshot(self, kind: str, target_date: date):
-        df = self.store.read(kind, target_date)
-        if not df.empty:
-            return df
-
-        for cached_date in reversed(self.store.list_cached_dates(kind)):
-            if cached_date <= target_date:
-                snapshot = self.store.read(kind, cached_date)
-                if not snapshot.empty:
-                    return snapshot
-        return df
-
     def run(self, target_date: date) -> SelectionResult:
         log.info("开始选股，target_date=%s", target_date)
         universe = self._load_universe(target_date)
@@ -120,7 +108,7 @@ class SelectionEngine:
         )
 
     def _load_universe(self, target_date: date) -> list[str]:
-        df = self.store.read("universe", target_date)
+        df = self.store.read_latest_before("universe", target_date)
         if df.empty:
             df = self.fetcher.list_universe(target_date)
             if not df.empty:
@@ -164,14 +152,48 @@ class SelectionEngine:
                 if ctx is None:
                     failed.append((code, "missing data"))
                     continue
-                scores.append(self.scorer.score_one(ctx))
+                score = self.scorer.score_one(ctx)
+                self._annotate_filter_values(score, ctx)
+                scores.append(score)
             except Exception as exc:  # noqa: BLE001
                 failed.append((code, str(exc)))
         return scores, failed
 
+    def _annotate_filter_values(self, score: StockScore, ctx: FactorContext) -> None:
+        """Compute filter-only factors and merge into score.raw_values.
+
+        Filter factors (e.g. roe_above_15, revenue_growth_positive) are not in
+        scoring.factors, so score_one does not compute them. Without this
+        annotation, _passes_all_filters looks up missing keys and rejects
+        every stock.
+        """
+        from stone.selector.factors import REGISTRY
+
+        for rule in self.filters:
+            if rule.factor in score.raw_values and score.raw_values[rule.factor] is not None:
+                continue
+            factor_cls = REGISTRY.get(rule.factor)
+            if factor_cls is None:
+                score.raw_values[rule.factor] = None
+                continue
+            try:
+                score.raw_values[rule.factor] = factor_cls().compute(ctx)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "filter factor %s failed for %s: %s: %s",
+                    rule.factor,
+                    ctx.code,
+                    type(exc).__name__,
+                    exc,
+                )
+                score.raw_values[rule.factor] = None
+
     def _build_context(self, code: str, target_date: date) -> FactorContext | None:
         history = self.strategy.universe.history_days
-        start = target_date.fromordinal(target_date.toordinal() - history - 60)
+        # Convert trading days to calendar days: 1 trading day ≈ 1.5 calendar days
+        # (weekends + holidays). Buffer +30 for year-boundary safety.
+        calendar_lookback = int(history * 1.5) + 30
+        start = target_date.fromordinal(target_date.toordinal() - calendar_lookback)
         kline_df = self.store.read_kline_range(start, target_date)
         kline = pd.DataFrame()
         if not kline_df.empty and "code" in kline_df.columns:
@@ -189,11 +211,11 @@ class SelectionEngine:
             return None
         kline = kline.sort_values("date").reset_index(drop=True)
 
-        financial = self._load_latest_snapshot("financial", target_date)
+        financial = self.store.read_latest_before("financial", target_date)
         if not financial.empty and "code" in financial.columns:
             financial = financial[financial["code"].astype(str) == code]
 
-        moneyflow = self._load_latest_snapshot("moneyflow", target_date)
+        moneyflow = self.store.read_latest_before("moneyflow", target_date)
         if not moneyflow.empty and "code" in moneyflow.columns:
             moneyflow = moneyflow[moneyflow["code"].astype(str) == code]
 
@@ -219,7 +241,7 @@ class SelectionEngine:
 
     def _fetch_close_prices(self, codes: list[str], target_date: date) -> list[float]:
         prices: list[float] = []
-        kline = self.store.read_kline(target_date)
+        kline = self.store.read_kline_latest_before(target_date)
         for code in codes:
             row = kline[kline["code"].astype(str) == code] if not kline.empty else kline
             prices.append(float(row["close"].iloc[0]) if not row.empty else 0.0)

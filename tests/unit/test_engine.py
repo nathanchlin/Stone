@@ -339,3 +339,64 @@ def test_build_context_fetches_and_caches_kline_when_store_is_empty(tmp_path):
     assert ctx is not None
     assert len(ctx.kline) == 80
     assert store.list_cached_dates("kline")
+
+
+def test_fetch_close_prices_falls_back_to_latest_trading_day(tmp_path):
+    """target_date has no kline (e.g., weekend) — should use most recent cached trading day."""
+    from stone.selector.factors import register_factor
+    from stone.selector.factors.base import Factor
+    from stone.selector.strategy import (
+        Constraints,
+        Meta,
+        OutputConfig,
+        Scoring,
+        ScoringFactor,
+        Strategy,
+        UniverseConfig,
+    )
+
+    @register_factor
+    class _StubClose(Factor):
+        name = "_stub_close_test"
+        category = "technical"
+        higher_is_better = True
+
+        def compute(self, ctx):
+            return 1.0
+
+        def get_params(self):
+            return {}
+
+    strategy = Strategy(
+        meta=Meta(name="test", version="1.0.0", created_at=date(2026, 6, 14)),
+        universe=UniverseConfig(rules_file=tmp_path / "rules.yaml", history_days=60),
+        filters=[],
+        scoring=Scoring(factors=[ScoringFactor(factor="_stub_close_test", weight=1.0)]),
+        output=OutputConfig(top_n=5, min_score=0.0),
+        constraints=Constraints(max_per_industry=10, max_per_theme=10),
+    )
+
+    store = ParquetStore(tmp_path)
+    friday = date(2026, 6, 12)
+    target = date(2026, 6, 14)  # Sunday — no kline cached
+
+    store.write_kline(
+        friday,
+        pd.DataFrame(
+            {
+                "code": ["c1", "c2"],
+                "date": [friday, friday],
+                "open": [10.0, 20.0],
+                "high": [11.0, 21.0],
+                "low": [9.0, 19.0],
+                "close": [10.5, 20.5],
+                "volume": [1000, 2000],
+                "amount": [10500.0, 41000.0],
+            }
+        ),
+    )
+
+    engine = SelectionEngine(strategy=strategy, store=store, fetcher=MagicMock())
+    prices = engine._fetch_close_prices(["c1", "c2"], target)
+
+    assert prices == [10.5, 20.5]

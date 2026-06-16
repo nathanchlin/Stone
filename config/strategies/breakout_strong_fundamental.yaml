@@ -1,0 +1,37 @@
+meta:
+  name: breakout_strong_fundamental
+  version: 1.2.0
+  description: Aggressive breakout with revenue-growth filter (3-factor scoring)
+
+universe:
+  include_boards:
+    - sh_main
+    - sz_main
+    - chinext
+    - star
+    - bse
+  exclude_st: true
+
+filters:
+  - factor: revenue_growth_positive
+    criterion: "value >= 1.0"
+
+scoring:
+  method: weighted_average
+  factors:
+    - factor: breakout_20d_high
+      weight: 0.50
+    - factor: volume_ratio
+      weight: 0.30
+    - factor: distance_to_52w_high
+      weight: 0.20
+
+output:
+  top_n: 5
+  min_score: 0.0
+  sort_by: score
+  sort_desc: true
+
+constraints:
+  max_per_industry: 5
+  max_per_theme: 3

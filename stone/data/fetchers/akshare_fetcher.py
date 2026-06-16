@@ -1,14 +1,13 @@
 """Akshare-backed implementation of the data fetcher protocol."""
 
 from datetime import date
-from json import JSONDecodeError
 from pathlib import Path
 
 import pandas as pd
 
 from stone.constants import AKSHARE_MAX_RATE
 from stone.data.fetchers._rate_limiter import RateLimiter
-from stone.data.fetchers._retry import with_retry
+from stone.data.fetchers._retry import TRANSIENT_EXCEPTIONS, with_retry
 from stone.errors import DataError
 
 try:
@@ -37,6 +36,8 @@ _MONEYFLOW_RENAME_CANDIDATES = {
     "main_net": ["主力净流入-净额", "主力净流入净额", "主力净流入"],
     "north_net": ["北向资金净流入", "北向净流入", "陆股通净流入"],
 }
+
+KLINE_SOURCES = ("eastmoney", "netease")
 
 
 class AkshareFetcher:
@@ -180,13 +181,7 @@ class AkshareFetcher:
         self._hist_limiter.acquire()
         client = self._require_client()
         try:
-            df = client.stock_zh_a_hist(
-                symbol=code,
-                period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-                adjust=adjust,
-            )
+            df, source = self._fetch_kline_with_fallback(client, code, start, end, adjust)
         except Exception:
             if not cached.empty:
                 subset = cached[(cached["date"] >= start) & (cached["date"] <= end)].reset_index(drop=True)
@@ -194,14 +189,17 @@ class AkshareFetcher:
                     return subset
             raise
 
-        if df.empty:
+        if not isinstance(df, pd.DataFrame) or df.empty:
             if not cached.empty:
                 subset = cached[(cached["date"] >= start) & (cached["date"] <= end)].reset_index(drop=True)
                 if not subset.empty:
                     return subset
             raise DataError(f"Empty kline for {code} from {start} to {end}")
 
-        renamed = df.rename(columns=_KLINE_RENAME)
+        if source == "eastmoney":
+            renamed = df.rename(columns=_KLINE_RENAME)
+        else:  # netease already returns English columns
+            renamed = df.rename(columns={"turnover": "turnover_rate"})
         canonical_columns = ["date", "open", "high", "low", "close", "volume", "amount"]
         if "turnover_rate" in renamed.columns:
             canonical_columns.append("turnover_rate")
@@ -220,6 +218,54 @@ class AkshareFetcher:
             raise DataError(f"Empty kline for {code} from {start} to {end}")
         return subset
 
+    def _fetch_kline_eastmoney(
+        self, client, code: str, start: date, end: date, adjust: str
+    ) -> pd.DataFrame:
+        """Primary source: eastmoney stock_zh_a_hist."""
+        return client.stock_zh_a_hist(
+            symbol=code,
+            period="daily",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust=adjust,
+        )
+
+    def _fetch_kline_netease(
+        self, client, code: str, start: date, end: date, adjust: str
+    ) -> pd.DataFrame:
+        """Fallback source: netease stock_zh_a_daily. Symbol needs sh/sz prefix."""
+        prefix = "sh" if code.startswith(("6", "9")) else "sz"
+        raw = client.stock_zh_a_daily(
+            symbol=f"{prefix}{code}",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+            adjust=adjust,
+        )
+        # netease turnover is decimal (0.005 = 0.5%); eastmoney 换手率 is percent (0.5)
+        # normalize to percent so downstream turnover_rate factor behaves consistently
+        if isinstance(raw, pd.DataFrame) and not raw.empty and "turnover" in raw.columns:
+            raw = raw.copy()
+            raw["turnover"] = pd.to_numeric(raw["turnover"], errors="coerce") * 100
+        return raw
+
+    def _fetch_kline_with_fallback(
+        self, client, code: str, start: date, end: date, adjust: str
+    ) -> tuple[pd.DataFrame, str]:
+        """Try each source in order. Re-raise last transient exception if all fail transiently."""
+        last_exc: Exception | None = None
+        for source_name in KLINE_SOURCES:
+            try:
+                fn = getattr(self, f"_fetch_kline_{source_name}")
+                df = fn(client, code, start, end, adjust)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    return df, source_name
+            except TRANSIENT_EXCEPTIONS as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            raise last_exc
+        return pd.DataFrame(), "none"
+
     @with_retry()
     def get_basic_financial(self, code: str) -> pd.DataFrame:
         self._limiter.acquire()
@@ -235,9 +281,134 @@ class AkshareFetcher:
         market = "sh" if code.startswith(("6", "9")) else "sz"
         try:
             raw = client.stock_individual_fund_flow(stock=code, market=market)
-        except (ConnectionError, TimeoutError, JSONDecodeError):
+            if not raw.empty:
+                return self._normalize_moneyflow(raw.tail(days))
+        except TRANSIENT_EXCEPTIONS:
+            pass
+        # Fallback 1: eastmoney push2 daykline endpoint (multi-day, sometimes blocked)
+        df = self._fetch_moneyflow_push2(code, market, days)
+        if not df.empty:
+            return df
+        # Fallback 2: eastmoney push2 ulist snapshot (today only — most reliable)
+        return self._fetch_moneyflow_push2_snapshot(code, market)
+
+    def _fetch_moneyflow_push2(
+        self, code: str, market: str, days: int
+    ) -> pd.DataFrame:
+        """Fetch daily fund flow via eastmoney push2 daykline endpoint."""
+        import requests
+
+        secid = f"{'1' if market == 'sh' else '0'}.{code}"
+        url = "https://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
+        params: dict[str, str] = {
+            "lmt": str(days),
+            "klt": "101",  # daily
+            "secid": secid,
+            "fields1": "f1,f2,f3,f7",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63",
+            "ut": "b2884a393a59ad64002292a3e90d46a5",
+        }
+        try:
+            resp = requests.get(
+                url,
+                params=params,
+                headers={
+                    "Referer": "https://data.eastmoney.com/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:  # noqa: BLE001 — best-effort fallback
             return pd.DataFrame(columns=["main_net", "north_net"])
-        return self._normalize_moneyflow(raw.tail(days))
+
+        klines = data.get("data", {}).get("klines", []) if data.get("data") else []
+        if not klines:
+            return pd.DataFrame(columns=["main_net", "north_net"])
+
+        rows: list[dict] = []
+        for line in klines:
+            parts = line.split(",")
+            if len(parts) < 6:
+                continue
+            try:
+                rows.append(
+                    {
+                        "date": pd.to_datetime(parts[0]).date(),
+                        "main_net": float(parts[1]),  # 主力净流入
+                        "small_net": float(parts[2]),
+                        "medium_net": float(parts[3]),
+                        "large_net": float(parts[4]),
+                        "super_large_net": float(parts[5]),
+                        "north_net": float("nan"),
+                    }
+                )
+            except (ValueError, IndexError):
+                continue
+
+        if not rows:
+            return pd.DataFrame(columns=["main_net", "north_net"])
+
+        return pd.DataFrame(rows).tail(days)
+
+    def _fetch_moneyflow_push2_snapshot(
+        self, code: str, market: str
+    ) -> pd.DataFrame:
+        """Fetch today's fund flow snapshot via eastmoney push2 ulist endpoint.
+
+        Less preferred than the daykline endpoint (only today's value, no
+        history), but more reliable when anti-bot is aggressive.
+        """
+        from datetime import date as _date
+
+        import requests
+
+        secid = f"{'1' if market == 'sh' else '0'}.{code}"
+        url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+        params: dict[str, str] = {
+            "secids": secid,
+            "fields": "f12,f55,f62,f66,f72,f78,f84",
+            "ut": "b2884a393a59ad64002292a3e90d46a5",
+        }
+        try:
+            resp = requests.get(
+                url,
+                params=params,
+                headers={
+                    "Referer": "https://data.eastmoney.com/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame(columns=["main_net", "north_net"])
+
+        diff = data.get("data", {}).get("diff", []) if data.get("data") else []
+        if not diff:
+            return pd.DataFrame(columns=["main_net", "north_net"])
+
+        row = diff[0]
+        try:
+            return pd.DataFrame(
+                [
+                    {
+                        "date": _date.today(),
+                        "main_net": float(row.get("f62", 0)),  # 主力净流入
+                        "super_large_net": float(row.get("f66", 0)),
+                        "large_net": float(row.get("f72", 0)),
+                        "medium_net": float(row.get("f78", 0)),
+                        "small_net": float(row.get("f84", 0)),
+                        "north_net": float("nan"),
+                    }
+                ]
+            )
+        except (ValueError, TypeError):
+            return pd.DataFrame(columns=["main_net", "north_net"])
 
     @with_retry()
     def get_industry_mapping(self) -> dict[str, str]:

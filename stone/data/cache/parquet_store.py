@@ -32,6 +32,21 @@ class ParquetStore:
     def read_kline(self, target: date) -> pd.DataFrame:
         return self.read("kline", target)
 
+    def read_latest_before(self, kind: str, target: date) -> pd.DataFrame:
+        """Return the latest cached partition for `kind` on or before `target`.
+
+        Falls back to the most recent trading day when `target` is a weekend,
+        holiday, or uncached date. Returns empty DataFrame if no partition
+        exists at or before `target`.
+        """
+        for cached_date in reversed(self.list_cached_dates(kind)):
+            if cached_date <= target:
+                return self.read(kind, cached_date)
+        return pd.DataFrame()
+
+    def read_kline_latest_before(self, target: date) -> pd.DataFrame:
+        return self.read_latest_before("kline", target)
+
     def read_range(self, kind: str, start: date, end: date) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
         for target in self.list_cached_dates(kind):
