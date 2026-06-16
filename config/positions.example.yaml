@@ -1,0 +1,43 @@
+# Current holdings for daily analysis.
+# Legal: user-preset rules. Tool computes P&L + risk metrics from these.
+# Tool does NOT recommend buys/sells.
+#
+# Copy to config/positions.yaml (gitignored) and edit with your actual holdings.
+
+total_capital: 10000
+
+positions:
+  - code: "600909"
+    name: "华安证券"
+    buy_price: 8.047
+    shares: 300
+    stop_loss_pct: 0.08
+    take_profit_pct: 0.20
+  - code: "000776"
+    name: "广发证券"
+    buy_price: 20.791
+    shares: 100
+    stop_loss_pct: 0.08
+    take_profit_pct: 0.20
+  - code: "600999"
+    name: "招商证券"
+    buy_price: 18.511
+    shares: 100
+    stop_loss_pct: 0.08
+    take_profit_pct: 0.20
+
+# Watchlist for pre-market scan (not held, monitor for entries)
+watchlist:
+  - code: "600030"
+    name: "中信证券"
+  - code: "601688"
+    name: "华泰证券"
+  - code: "600837"
+    name: "海通证券"
+
+# Market indices to track
+indices:
+  - symbol: "sh000001"
+    name: "上证指数"
+  - symbol: "sh000300"
+    name: "沪深300"

@@ -36,6 +36,7 @@ data_cache/_failed_dates.json
 .env
 .env.local
 config/personal/
+config/positions.yaml
 *.secret
 *.key
 
