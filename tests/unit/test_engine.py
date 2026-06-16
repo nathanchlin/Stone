@@ -400,3 +400,190 @@ def test_fetch_close_prices_falls_back_to_latest_trading_day(tmp_path):
     prices = engine._fetch_close_prices(["c1", "c2"], target)
 
     assert prices == [10.5, 20.5]
+
+
+def test_compute_scores_parallel_uses_preload_and_returns_scores(tmp_path):
+    """Parallel path should preload all klines once and return scores for all codes."""
+    from stone.selector.factors import register_factor
+    from stone.selector.factors.base import Factor
+    from stone.selector.strategy import (
+        Constraints,
+        Meta,
+        OutputConfig,
+        Scoring,
+        ScoringFactor,
+        Strategy,
+        UniverseConfig,
+    )
+
+    @register_factor
+    class _StubParallel(Factor):
+        name = "_stub_parallel_test"
+        category = "technical"
+        higher_is_better = True
+
+        def compute(self, ctx):
+            return 1.0
+
+        def get_params(self):
+            return {}
+
+    strategy = Strategy(
+        meta=Meta(name="test", version="1.0.0", created_at=date(2026, 6, 14)),
+        universe=UniverseConfig(rules_file=tmp_path / "rules.yaml", history_days=60),
+        filters=[],
+        scoring=Scoring(factors=[ScoringFactor(factor="_stub_parallel_test", weight=1.0)]),
+        output=OutputConfig(top_n=5, min_score=0.0),
+        constraints=Constraints(max_per_industry=10, max_per_theme=10),
+    )
+
+    store = ParquetStore(tmp_path)
+    target = date(2026, 6, 14)
+
+    # Seed kline partitions for 3 codes across multiple dates
+    for offset in range(80):
+        d = date(2026, 3, 1) + pd.Timedelta(days=offset).to_timedelta().days * pd.Timedelta(days=1) if False else _add_days(date(2026, 3, 1), offset)
+        rows = []
+        for code in ["c1", "c2", "c3"]:
+            rows.append({
+                "code": code, "date": d, "open": 10.0, "high": 11.0,
+                "low": 9.0, "close": 10.5, "volume": 1000, "amount": 10500.0,
+            })
+        store.write_kline(d, pd.DataFrame(rows))
+
+    engine = SelectionEngine(strategy=strategy, store=store, fetcher=MagicMock())
+    # Small universe (< 20) goes sequential path
+    scores, failed = engine._compute_scores_parallel(["c1", "c2", "c3"], target)
+
+    assert len(scores) == 3
+    assert failed == []
+    codes_scored = {s.code for s in scores}
+    assert codes_scored == {"c1", "c2", "c3"}
+
+
+def _add_days(d: date, days: int) -> date:
+    from datetime import timedelta
+    return d + timedelta(days=days)
+
+
+def test_compute_scores_parallel_handles_missing_data(tmp_path):
+    """Codes without cached kline go to failed list."""
+    from stone.selector.factors import register_factor
+    from stone.selector.factors.base import Factor
+    from stone.selector.strategy import (
+        Constraints,
+        Meta,
+        OutputConfig,
+        Scoring,
+        ScoringFactor,
+        Strategy,
+        UniverseConfig,
+    )
+
+    @register_factor
+    class _StubMissing(Factor):
+        name = "_stub_missing_test"
+        category = "technical"
+        higher_is_better = True
+
+        def compute(self, ctx):
+            return 1.0
+
+        def get_params(self):
+            return {}
+
+    strategy = Strategy(
+        meta=Meta(name="test", version="1.0.0", created_at=date(2026, 6, 14)),
+        universe=UniverseConfig(rules_file=tmp_path / "rules.yaml", history_days=60),
+        filters=[],
+        scoring=Scoring(factors=[ScoringFactor(factor="_stub_missing_test", weight=1.0)]),
+        output=OutputConfig(top_n=5, min_score=0.0),
+        constraints=Constraints(max_per_industry=10, max_per_theme=10),
+    )
+
+    store = ParquetStore(tmp_path)
+    target = date(2026, 6, 14)
+
+    # Only seed c1
+    for offset in range(80):
+        d = _add_days(date(2026, 3, 1), offset)
+        store.write_kline(d, pd.DataFrame([{
+            "code": "c1", "date": d, "open": 10.0, "high": 11.0,
+            "low": 9.0, "close": 10.5, "volume": 1000, "amount": 10500.0,
+        }]))
+
+    engine = SelectionEngine(strategy=strategy, store=store, fetcher=MagicMock())
+    scores, failed = engine._compute_scores_parallel(["c1", "missing1", "missing2"], target)
+
+    assert len(scores) == 1
+    assert scores[0].code == "c1"
+    assert len(failed) == 2
+    failed_codes = {code for code, _ in failed}
+    assert failed_codes == {"missing1", "missing2"}
+
+
+def test_compute_scores_parallel_worker_exception_goes_to_failed(tmp_path):
+    """If worker raises, code goes to failed list with error message."""
+    from stone.selector.factors import register_factor
+    from stone.selector.factors.base import Factor
+    from stone.selector.strategy import (
+        Constraints,
+        Meta,
+        OutputConfig,
+        Scoring,
+        ScoringFactor,
+        Strategy,
+        UniverseConfig,
+    )
+
+    @register_factor
+    class _StubExc(Factor):
+        name = "_stub_exc_test"
+        category = "technical"
+        higher_is_better = True
+
+        def compute(self, ctx):
+            return 1.0
+
+        def get_params(self):
+            return {}
+
+    strategy = Strategy(
+        meta=Meta(name="test", version="1.0.0", created_at=date(2026, 6, 14)),
+        universe=UniverseConfig(rules_file=tmp_path / "rules.yaml", history_days=60),
+        filters=[],
+        scoring=Scoring(factors=[ScoringFactor(factor="_stub_exc_test", weight=1.0)]),
+        output=OutputConfig(top_n=5, min_score=0.0),
+        constraints=Constraints(max_per_industry=10, max_per_theme=10),
+    )
+
+    store = ParquetStore(tmp_path)
+    target = date(2026, 6, 14)
+
+    # Seed c1 but force worker to fail by patching _score_one_stock_worker
+    for offset in range(80):
+        d = _add_days(date(2026, 3, 1), offset)
+        store.write_kline(d, pd.DataFrame([{
+            "code": "c1", "date": d, "open": 10.0, "high": 11.0,
+            "low": 9.0, "close": 10.5, "volume": 1000, "amount": 10500.0,
+        }]))
+
+    engine = SelectionEngine(strategy=strategy, store=store, fetcher=MagicMock())
+
+    # Monkey-patch the module-level worker to raise
+    from stone.selector import engine as engine_module
+    original = engine_module._score_one_stock_worker
+
+    def _failing_worker(args):
+        raise RuntimeError("worker boom")
+
+    engine_module._score_one_stock_worker = _failing_worker
+    try:
+        scores, failed = engine._compute_scores_parallel(["c1"], target)
+    finally:
+        engine_module._score_one_stock_worker = original
+
+    assert scores == []
+    assert len(failed) == 1
+    assert failed[0][0] == "c1"
+    assert "worker boom" in failed[0][1]

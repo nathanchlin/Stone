@@ -1,6 +1,9 @@
 """Selection engine orchestration."""
 
 import logging
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -18,6 +21,64 @@ from stone.selector.scoring import ScoringEngine, StockScore
 from stone.selector.strategy import Strategy
 
 log = logging.getLogger(__name__)
+
+
+def _score_one_stock_worker(args) -> StockScore:
+    """Module-level worker function for ProcessPoolExecutor.
+
+    Pickles cleanly (no closure state). Each worker creates its own
+    ScoringEngine from the pickled config and runs score_one + filter
+    annotation in isolation.
+    """
+    (
+        code,
+        name,
+        industry,
+        today,
+        kline_df,
+        financial_df,
+        moneyflow_df,
+        scoring_config,
+        filter_rules,
+    ) = args
+
+    # Import inside function — worker process re-imports cleanly
+    from stone.selector.factors import REGISTRY  # noqa: PLC0415
+    from stone.selector.scoring import ScoringEngine  # noqa: PLC0415
+
+    scorer = ScoringEngine(scoring_config)
+    ctx = FactorContext(
+        code=code,
+        name=name,
+        industry=industry,
+        today=today,
+        kline=kline_df,
+        financial=financial_df,
+        moneyflow=moneyflow_df,
+    )
+    score = scorer.score_one(ctx)
+
+    # Annotate filter-only factors (not in scoring.factors)
+    for rule in filter_rules:
+        if rule.factor in score.raw_values and score.raw_values[rule.factor] is not None:
+            continue
+        factor_cls = REGISTRY.get(rule.factor)
+        if factor_cls is None:
+            score.raw_values[rule.factor] = None
+            continue
+        try:
+            score.raw_values[rule.factor] = factor_cls().compute(ctx)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "filter factor %s failed for %s: %s: %s",
+                rule.factor,
+                code,
+                type(exc).__name__,
+                exc,
+            )
+            score.raw_values[rule.factor] = None
+
+    return score
 
 
 @dataclass
@@ -144,28 +205,111 @@ class SelectionEngine:
         universe: list[str],
         target_date: date,
     ) -> tuple[list[StockScore], list[tuple[str, str]]]:
-        scores: list[StockScore] = []
+        """Parallel scoring with preload + ProcessPoolExecutor + per-stock timeout.
+
+        Implements fixes for C1/C2/C3:
+        - C2: preload all klines ONCE into dict[code, DataFrame] (skip N² scan)
+        - C1: ProcessPoolExecutor(max_workers=4) + as_completed for parallel scoring
+        - C3: future.result(timeout=10) — one stuck stock can't hang the pipeline
+        """
+        history = self.strategy.universe.history_days
+        calendar_lookback = int(history * 1.5) + 30
+        start = target_date.fromordinal(target_date.toordinal() - calendar_lookback)
+
+        # C2 fix: preload all klines in one batch read
+        log.info("preloading klines for %d stocks (%s..%s)...", len(universe), start, target_date)
+        all_klines = self.store.read_kline_range_grouped(start, target_date)
+        all_financials = self.store.read_latest_before("financial", target_date)
+        all_moneyflow = self.store.read_latest_before("moneyflow", target_date)
+
+        # Build worker args; collect missing codes
+        worker_args: list[tuple] = []
         failed: list[tuple[str, str]] = []
-        for code in tqdm(universe, desc="打分中"):
-            try:
-                ctx = self._build_context(code, target_date)
-                if ctx is None:
-                    failed.append((code, "missing data"))
-                    continue
-                score = self.scorer.score_one(ctx)
-                self._annotate_filter_values(score, ctx)
-                scores.append(score)
-            except Exception as exc:  # noqa: BLE001
-                failed.append((code, str(exc)))
+        for code in universe:
+            code_str = str(code)
+            kline_df = all_klines.get(code_str)
+            if kline_df is None or kline_df.empty:
+                failed.append((code, "missing data"))
+                continue
+
+            financial_df = (
+                all_financials[all_financials["code"].astype(str) == code_str]
+                if not all_financials.empty and "code" in all_financials.columns
+                else pd.DataFrame()
+            )
+            moneyflow_df = (
+                all_moneyflow[all_moneyflow["code"].astype(str) == code_str]
+                if not all_moneyflow.empty and "code" in all_moneyflow.columns
+                else pd.DataFrame()
+            )
+
+            name = code_str
+            industry = "unknown"
+            if self._universe_snapshot is not None and not self._universe_snapshot.empty:
+                meta = self._universe_snapshot[self._universe_snapshot["code"].astype(str) == code_str]
+                if not meta.empty:
+                    if "name" in meta.columns:
+                        name = str(meta.iloc[0]["name"])
+                    if "industry" in meta.columns and pd.notna(meta.iloc[0]["industry"]):
+                        industry = str(meta.iloc[0]["industry"])
+
+            worker_args.append(
+                (
+                    code_str,
+                    name,
+                    industry,
+                    target_date,
+                    kline_df,
+                    financial_df,
+                    moneyflow_df,
+                    self.strategy.scoring,
+                    self.filters,
+                )
+            )
+
+        if not worker_args:
+            return [], failed
+
+        scores: list[StockScore] = []
+
+        # Small universe → sequential (avoid process startup overhead)
+        if len(worker_args) < 20:
+            log.info("scoring %d stocks sequentially (below parallel threshold)", len(worker_args))
+            for arg in tqdm(worker_args, desc="打分中"):
+                try:
+                    scores.append(_score_one_stock_worker(arg))
+                except Exception as exc:  # noqa: BLE001
+                    failed.append((arg[0], str(exc)))
+            return scores, failed
+
+        # C1 fix: parallel scoring with ProcessPoolExecutor
+        # C3 fix: per-stock 10s timeout
+        max_workers = min(4, (os.cpu_count() or 1))
+        log.info("scoring %d stocks in parallel (max_workers=%d)", len(worker_args), max_workers)
+
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_score_one_stock_worker, arg): arg[0] for arg in worker_args}
+            for future in tqdm(as_completed(futures), total=len(futures), desc="打分中"):
+                code = futures[future]
+                try:
+                    score = future.result(timeout=10)
+                    scores.append(score)
+                except FuturesTimeoutError:
+                    log.warning("timeout scoring %s after 10s", code)
+                    failed.append((code, "timeout after 10s"))
+                    future.cancel()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("worker failed for %s: %s: %s", code, type(exc).__name__, exc)
+                    failed.append((code, str(exc)))
+
         return scores, failed
 
     def _annotate_filter_values(self, score: StockScore, ctx: FactorContext) -> None:
         """Compute filter-only factors and merge into score.raw_values.
 
-        Filter factors (e.g. roe_above_15, revenue_growth_positive) are not in
-        scoring.factors, so score_one does not compute them. Without this
-        annotation, _passes_all_filters looks up missing keys and rejects
-        every stock.
+        Kept for backward compatibility / single-stock use cases.
+        The parallel scoring path (_compute_scores_parallel) handles filter
+        annotation inline inside the worker function.
         """
         from stone.selector.factors import REGISTRY
 

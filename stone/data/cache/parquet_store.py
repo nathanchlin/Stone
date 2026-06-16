@@ -61,6 +61,46 @@ class ParquetStore:
     def read_kline_range(self, start: date, end: date) -> pd.DataFrame:
         return self.read_range("kline", start, end)
 
+    def read_kline_range_grouped(
+        self, start: date, end: date
+    ) -> dict[str, pd.DataFrame]:
+        """Read all klines in [start, end] and group by code.
+
+        Single-pass read via pyarrow ParquetDataset is much faster than
+        N × pd.read_parquet for large date ranges. Used by SelectionEngine
+        to preload all klines once instead of N times (C2/C4 fix).
+        """
+        paths = [
+            self._path("kline", d)
+            for d in self.list_cached_dates("kline")
+            if start <= d <= end and self._path("kline", d).exists()
+        ]
+        if not paths:
+            return {}
+
+        try:
+            import pyarrow.parquet as pq
+
+            table = pq.ParquetDataset(paths).read()
+            df = table.to_pandas()
+        except Exception:
+            # Fallback to per-file read if pyarrow path fails
+            frames = [pd.read_parquet(p) for p in paths]
+            df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+        if df.empty or "code" not in df.columns:
+            return {}
+
+        # Normalize date column type
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+            df = df.dropna(subset=["date"])
+
+        return {
+            str(code): group.sort_values("date").reset_index(drop=True)
+            for code, group in df.groupby("code")
+        }
+
     def list_cached_dates(self, kind: str) -> list[date]:
         kind_dir = self.base_dir / kind
         if not kind_dir.exists():
