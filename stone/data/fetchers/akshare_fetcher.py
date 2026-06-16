@@ -170,12 +170,20 @@ class AkshareFetcher:
     def get_daily_kline(
         self, code: str, start: date, end: date, adjust: str = "qfq"
     ) -> pd.DataFrame:
+        today = date.today()
         cached = self._read_snapshot("kline", code)
         if not cached.empty:
             cached["date"] = pd.to_datetime(cached["date"], errors="coerce").dt.date
             cached = cached.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
             subset = cached[(cached["date"] >= start) & (cached["date"] <= end)].reset_index(drop=True)
-            if not subset.empty and cached["date"].min() <= start and cached["date"].max() >= end:
+            # Skip early-return when today is in range — sina may have fresher data
+            # than the cached snapshot (netease is T+1 delayed).
+            if (
+                end < today
+                and not subset.empty
+                and cached["date"].min() <= start
+                and cached["date"].max() >= end
+            ):
                 return subset
 
         self._hist_limiter.acquire()
@@ -186,32 +194,56 @@ class AkshareFetcher:
             if not cached.empty:
                 subset = cached[(cached["date"] >= start) & (cached["date"] <= end)].reset_index(drop=True)
                 if not subset.empty:
-                    return subset
+                    # Fall through to sina merge below instead of returning
+                    merged = cached
+                    return self._merge_realtime_and_return(merged, code, start, end, today)
             raise
 
         if not isinstance(df, pd.DataFrame) or df.empty:
             if not cached.empty:
-                subset = cached[(cached["date"] >= start) & (cached["date"] <= end)].reset_index(drop=True)
-                if not subset.empty:
-                    return subset
-            raise DataError(f"Empty kline for {code} from {start} to {end}")
-
-        if source == "eastmoney":
-            renamed = df.rename(columns=_KLINE_RENAME)
-        else:  # netease already returns English columns
-            renamed = df.rename(columns={"turnover": "turnover_rate"})
-        canonical_columns = ["date", "open", "high", "low", "close", "volume", "amount"]
-        if "turnover_rate" in renamed.columns:
-            canonical_columns.append("turnover_rate")
-        canonical = renamed[canonical_columns].copy()
-        canonical["date"] = pd.to_datetime(canonical["date"]).dt.date
-        canonical = canonical.sort_values("date").reset_index(drop=True)
-        if cached.empty:
-            merged = canonical
+                merged = cached
+            else:
+                raise DataError(f"Empty kline for {code} from {start} to {end}")
         else:
-            merged = pd.concat([cached, canonical], ignore_index=True)
-            merged = merged.drop_duplicates(subset=["date"], keep="last")
-            merged = merged.sort_values("date").reset_index(drop=True)
+            if source == "eastmoney":
+                renamed = df.rename(columns=_KLINE_RENAME)
+            else:  # netease already returns English columns
+                renamed = df.rename(columns={"turnover": "turnover_rate"})
+            canonical_columns = ["date", "open", "high", "low", "close", "volume", "amount"]
+            if "turnover_rate" in renamed.columns:
+                canonical_columns.append("turnover_rate")
+            canonical = renamed[canonical_columns].copy()
+            canonical["date"] = pd.to_datetime(canonical["date"]).dt.date
+            canonical = canonical.sort_values("date").reset_index(drop=True)
+            if cached.empty:
+                merged = canonical
+            else:
+                merged = pd.concat([cached, canonical], ignore_index=True)
+                merged = merged.drop_duplicates(subset=["date"], keep="last")
+                merged = merged.sort_values("date").reset_index(drop=True)
+
+        return self._merge_realtime_and_return(merged, code, start, end, today)
+
+    def _merge_realtime_and_return(
+        self,
+        merged: pd.DataFrame,
+        code: str,
+        start: date,
+        end: date,
+        today: date,
+    ) -> pd.DataFrame:
+        """Append today's sina realtime quote if missing from merged, then return subset.
+
+        netease daily kline is T+1 delayed (returns data through yesterday). This
+        merge ensures callers always see today's data when end >= today.
+        """
+        if end >= today and (merged.empty or merged["date"].max() < today):
+            sina_row = self._fetch_kline_realtime_sina(code)
+            if not sina_row.empty and sina_row.iloc[0]["date"] == today:
+                merged = merged[merged["date"] != today]
+                merged = pd.concat([merged, sina_row], ignore_index=True)
+                merged = merged.sort_values("date").reset_index(drop=True)
+
         self._write_snapshot("kline", code, merged)
         subset = merged[(merged["date"] >= start) & (merged["date"] <= end)].reset_index(drop=True)
         if subset.empty:
@@ -247,6 +279,68 @@ class AkshareFetcher:
             raw = raw.copy()
             raw["turnover"] = pd.to_numeric(raw["turnover"], errors="coerce") * 100
         return raw
+
+    def _fetch_kline_realtime_sina(self, code: str) -> pd.DataFrame:
+        """Fetch today's OHLCV snapshot from sina hq endpoint.
+
+        netease daily kline has T+1 delay (only returns data through yesterday).
+        This method fetches today's realtime data so callers can access the
+        freshest available close. Returns empty DataFrame on any failure.
+
+        Note: during market hours (9:30-15:00), the "close" field is actually
+        the current intraday price. After 15:00, it is the official close.
+        """
+        import re
+
+        import requests
+
+        prefix = "sh" if code.startswith(("6", "9")) else "sz"
+        url = "https://hq.sinajs.cn"
+        headers = {
+            "Referer": "https://finance.sina.com.cn",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
+        try:
+            resp = requests.get(
+                url,
+                params={"list": f"{prefix}{code}"},
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+        except Exception:  # noqa: BLE001 — best-effort realtime fetch
+            return pd.DataFrame()
+
+        match = re.search(r'"([^"]+)"', resp.text)
+        if not match:
+            return pd.DataFrame()
+        parts = match.group(1).split(",")
+        if len(parts) < 32:
+            return pd.DataFrame()
+
+        try:
+            from datetime import datetime as _dt
+
+            sina_date = _dt.strptime(parts[30], "%Y-%m-%d").date()
+            return pd.DataFrame(
+                [
+                    {
+                        "date": sina_date,
+                        "open": float(parts[1]),
+                        "close": float(parts[3]),
+                        "high": float(parts[4]),
+                        "low": float(parts[5]),
+                        "volume": float(parts[8]),
+                        "amount": float(parts[9]),
+                    }
+                ]
+            )
+        except (ValueError, IndexError):
+            return pd.DataFrame()
 
     def _fetch_kline_with_fallback(
         self, client, code: str, start: date, end: date, adjust: str

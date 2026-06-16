@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -39,6 +39,31 @@ def _mock_netease_kline_df() -> pd.DataFrame:
             "turnover": [0.006, 0.007],
         }
     )
+
+
+def _mock_sina_hq_response(
+    name: str = "华安证券",
+    open_p: float = 8.00,
+    prev_close: float = 7.96,
+    current: float = 8.39,
+    high: float = 8.43,
+    low: float = 7.89,
+    volume: float = 349754480,
+    amount: float = 2858960517.0,
+    quote_date: str = None,
+) -> str:
+    """Format that matches real sina hq_sinajs response."""
+    from datetime import date as _date
+
+    quote_date = quote_date or _date.today().isoformat()
+    parts = [name, str(open_p), str(prev_close), str(current), str(high), str(low)]
+    parts += [str(current), f"{current + 0.01:.2f}", str(volume), str(amount)]
+    # 10 bid/ask levels (fields 10-29): each pair is volume + price
+    for i in range(10):
+        parts += [str(100 + i), f"{current - 0.01 * (i + 1):.2f}"]
+    parts += [quote_date, "15:00:01", "00"]
+    payload = ",".join(parts)
+    return f'var hq_str_sh600909="{payload}";'
 
 
 def test_get_daily_kline_returns_canonical_columns():
@@ -241,6 +266,130 @@ def test_get_money_flow_snapshot_returns_empty_on_failure():
 
     assert list(df.columns) == ["main_net", "north_net"]
     assert df.empty
+
+
+# ---------------------------------------------------------------------------
+# Bug C5 fix: sina realtime merge for today's data
+# ---------------------------------------------------------------------------
+
+def test_fetch_kline_realtime_sina_parses_hq_response():
+    """Direct call to sina realtime method parses today's OHLCV correctly."""
+    fetcher = AkshareFetcher()
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status.return_value = None
+    fake_resp.text = _mock_sina_hq_response(current=8.39, high=8.43, low=7.89, volume=349754480)
+    with patch("requests.get", return_value=fake_resp):
+        df = fetcher._fetch_kline_realtime_sina("600909")
+
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["close"] == 8.39
+    assert row["open"] == 8.00
+    assert row["high"] == 8.43
+    assert row["low"] == 7.89
+    assert row["volume"] == 349754480
+    assert row["date"] == date.today()
+
+
+def test_fetch_kline_realtime_sina_returns_empty_on_request_failure():
+    fetcher = AkshareFetcher()
+    with patch("requests.get", side_effect=ConnectionError("sina blocked")):
+        df = fetcher._fetch_kline_realtime_sina("600909")
+    assert df.empty
+
+
+def test_fetch_kline_realtime_sina_returns_empty_on_parse_failure():
+    """Malformed response → empty DataFrame, no exception."""
+    fetcher = AkshareFetcher()
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status.return_value = None
+    fake_resp.text = 'garbage without proper format'
+    with patch("requests.get", return_value=fake_resp):
+        df = fetcher._fetch_kline_realtime_sina("600909")
+    assert df.empty
+
+
+def test_get_daily_kline_merges_sina_realtime_when_today_missing():
+    """When historical source returns up to yesterday and end=today, sina is queried."""
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    fetcher = AkshareFetcher(snapshot_dir=MagicMock())
+
+    # Historical cache has through yesterday only (simulates T+1 delay)
+    cached = pd.DataFrame(
+        {
+            "date": [yesterday],
+            "open": [8.00],
+            "high": [8.10],
+            "low": [7.90],
+            "close": [8.05],
+            "volume": [1000],
+            "amount": [8050.0],
+        }
+    )
+    fetcher._read_snapshot = lambda kind, key: cached.copy() if kind == "kline" else pd.DataFrame()
+    fetcher._write_snapshot = lambda kind, key, df: None
+    fetcher._hist_limiter = MagicMock()
+    fetcher._require_client = MagicMock(return_value=MagicMock())
+    # netease returns nothing new (already have yesterday)
+    fetcher._fetch_kline_with_fallback = lambda *args: (pd.DataFrame(), "none")
+    # sina returns today
+    fetcher._fetch_kline_realtime_sina = lambda code: pd.DataFrame(
+        [{"date": today, "open": 8.20, "high": 8.43, "low": 8.10, "close": 8.39, "volume": 349754480, "amount": 2.86e9}]
+    )
+
+    df = fetcher.get_daily_kline("600909", yesterday, today, adjust="qfq")
+
+    assert today in df["date"].tolist()
+    assert df[df["date"] == today].iloc[0]["close"] == 8.39
+
+
+def test_get_daily_kline_skips_sina_when_end_is_in_past():
+    """end < today → sina not called, cache used directly."""
+    today = date.today()
+    past_date = today - timedelta(days=10)
+    fetcher = AkshareFetcher(snapshot_dir=MagicMock())
+
+    cached = pd.DataFrame(
+        {
+            "date": [past_date],
+            "open": [8.00], "high": [8.10], "low": [7.90], "close": [8.05],
+            "volume": [1000], "amount": [8050.0],
+        }
+    )
+    fetcher._read_snapshot = lambda kind, key: cached.copy() if kind == "kline" else pd.DataFrame()
+    fetcher._write_snapshot = lambda kind, key, df: None
+
+    # If sina is called, this would raise (MagicMock __call__)
+    fetcher._fetch_kline_realtime_sina = MagicMock(side_effect=AssertionError("sina should not be called"))
+
+    df = fetcher.get_daily_kline("600909", past_date, past_date, adjust="qfq")
+    assert len(df) == 1
+    assert df.iloc[0]["date"] == past_date
+    fetcher._fetch_kline_realtime_sina.assert_not_called()
+
+
+def test_get_daily_kline_skips_sina_when_historical_already_has_today():
+    """If historical source returns today (e.g. eastmoney during late session), no sina call."""
+    today = date.today()
+    fetcher = AkshareFetcher(snapshot_dir=MagicMock())
+
+    fetcher._read_snapshot = lambda kind, key: pd.DataFrame()
+    fetcher._write_snapshot = lambda kind, key, df: None
+    fetcher._hist_limiter = MagicMock()
+    fetcher._require_client = MagicMock(return_value=MagicMock())
+    # Historical returns today already
+    fetcher._fetch_kline_with_fallback = lambda *args: (
+        pd.DataFrame(
+            [{"date": today, "open": 8.0, "high": 8.4, "low": 7.9, "close": 8.3, "volume": 1, "amount": 8.3}]
+        ),
+        "eastmoney",
+    )
+    fetcher._fetch_kline_realtime_sina = MagicMock(side_effect=AssertionError("sina should not be called"))
+
+    df = fetcher.get_daily_kline("600909", today, today, adjust="qfq")
+    assert df.iloc[0]["close"] == 8.3
+    fetcher._fetch_kline_realtime_sina.assert_not_called()
 
 
 def test_get_daily_kline_falls_back_to_cached_snapshot(tmp_path):
