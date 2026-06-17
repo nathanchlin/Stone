@@ -67,8 +67,91 @@ def fetch_stock_data(fetcher: AkshareFetcher, code: str, days: int = 10) -> dict
     }
 
 
+def parse_sina_index_quote(text: str) -> dict | None:
+    """Parse sina hq response into an index quote dict.
+
+    Sina hq format: `var hq_str_sh000001="名称,今开,昨收,最新,最高,最低,买1,卖1,成交量,成交额,...,日期,时间";`
+    Returns None on any parse failure so callers can fall back to other sources.
+    """
+    import re
+
+    match = re.search(r'"([^"]+)"', text)
+    if not match:
+        return None
+    parts = match.group(1).split(",")
+    if len(parts) < 32:
+        return None
+    try:
+        from datetime import datetime as _dt
+
+        return {
+            "name": parts[0],
+            "open": float(parts[1]),
+            "prev_close": float(parts[2]),
+            "close": float(parts[3]),
+            "high": float(parts[4]),
+            "low": float(parts[5]),
+            "volume": float(parts[8]),
+            "amount": float(parts[9]),
+            "date": _dt.strptime(parts[30], "%Y-%m-%d").date(),
+        }
+    except (ValueError, IndexError):
+        return None
+
+
+def fetch_index_realtime_sina(symbol: str) -> dict:
+    """Fetch index realtime quote from sina hq endpoint.
+
+    symbol must be prefixed (e.g. 'sh000001', 'sh000300'). Returns {} on any
+    failure — callers should fall back to the tencent daily endpoint.
+    """
+    import requests
+
+    try:
+        resp = requests.get(
+            "https://hq.sinajs.cn",
+            params={"list": symbol},
+            headers={
+                "Referer": "https://finance.sina.com.cn",
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception:  # noqa: BLE001 — best-effort realtime fetch
+        return {}
+
+    quote = parse_sina_index_quote(resp.text)
+    if quote is None:
+        return {}
+    quote["change_pct"] = (
+        (quote["close"] - quote["prev_close"]) / quote["prev_close"] * 100
+        if quote["prev_close"] > 0
+        else 0
+    )
+    return quote
+
+
 def fetch_index(symbol: str, days: int = 10) -> dict:
-    """Get index data via tencent endpoint."""
+    """Get index quote, preferring sina realtime, falling back to tencent daily.
+
+    Why: tencent (ak.stock_zh_a_hist_tx) is T+1 delayed — during intraday it
+    returns yesterday's close as if it were latest, which silently corrupts
+    the report's market context. Sina hq is the authoritative realtime source.
+    """
+    quote = fetch_index_realtime_sina(symbol)
+    if quote and quote.get("date") == date.today():
+        return {
+            "close": quote["close"],
+            "change_pct": quote["change_pct"],
+            "date": quote["date"],
+        }
+
+    # Fallback: tencent daily kline (T+1 delayed but better than nothing)
     today = date.today()
     try:
         df = ak.stock_zh_a_hist_tx(
