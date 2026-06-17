@@ -369,8 +369,13 @@ def test_get_daily_kline_skips_sina_when_end_is_in_past():
     fetcher._fetch_kline_realtime_sina.assert_not_called()
 
 
-def test_get_daily_kline_skips_sina_when_historical_already_has_today():
-    """If historical source returns today (e.g. eastmoney during late session), no sina call."""
+def test_get_daily_kline_overwrites_historical_today_with_sina_when_end_is_today():
+    """When end >= today, sina always wins over historical eastmoney/netease.
+
+    Bug C5 v2: the previous design skipped sina when historical already contained
+    today's row. That assumed historical's "today" was fresh, but eastmoney can
+    return a stale intraday snapshot. For monitoring, sina is the source of truth.
+    """
     today = date.today()
     fetcher = AkshareFetcher(snapshot_dir=MagicMock())
 
@@ -378,18 +383,59 @@ def test_get_daily_kline_skips_sina_when_historical_already_has_today():
     fetcher._write_snapshot = lambda kind, key, df: None
     fetcher._hist_limiter = MagicMock()
     fetcher._require_client = MagicMock(return_value=MagicMock())
-    # Historical returns today already
+    # Historical returns today with a different close
     fetcher._fetch_kline_with_fallback = lambda *args: (
         pd.DataFrame(
             [{"date": today, "open": 8.0, "high": 8.4, "low": 7.9, "close": 8.3, "volume": 1, "amount": 8.3}]
         ),
         "eastmoney",
     )
-    fetcher._fetch_kline_realtime_sina = MagicMock(side_effect=AssertionError("sina should not be called"))
+    fetcher._fetch_kline_realtime_sina = lambda code: pd.DataFrame(
+        [{"date": today, "open": 8.20, "high": 9.05, "low": 8.26, "close": 8.77, "volume": 258276309, "amount": 2.26e9}]
+    )
 
     df = fetcher.get_daily_kline("600909", today, today, adjust="qfq")
-    assert df.iloc[0]["close"] == 8.3
-    fetcher._fetch_kline_realtime_sina.assert_not_called()
+    assert df.iloc[0]["close"] == 8.77  # sina wins, not historical 8.3
+
+
+def test_get_daily_kline_overwrites_stale_today_with_sina_realtime():
+    """Bug C5 v2: cached intraday snapshot of today must be overwritten by fresh sina quote.
+
+    Reproduces the real-world failure: an earlier run wrote today's intraday price
+    into the snapshot, so later runs saw `merged.date.max() == today` and skipped
+    sina — serving stale intraday prices as if they were fresh.
+    """
+    today = date.today()
+    yesterday = today - timedelta(days=1)
+    fetcher = AkshareFetcher(snapshot_dir=MagicMock())
+
+    # Cache contains a stale intraday snapshot of today (e.g. written at 10:01)
+    cached = pd.DataFrame(
+        {
+            "date": [yesterday, today],
+            "open": [8.00, 8.20],
+            "high": [8.10, 9.05],
+            "low": [7.90, 8.26],
+            "close": [8.05, 8.92],  # stale intraday snapshot
+            "volume": [1000, 5000],
+            "amount": [8050.0, 45000.0],
+        }
+    )
+    fetcher._read_snapshot = lambda kind, key: cached.copy() if kind == "kline" else pd.DataFrame()
+    fetcher._write_snapshot = lambda kind, key, df: None
+    fetcher._hist_limiter = MagicMock()
+    fetcher._require_client = MagicMock(return_value=MagicMock())
+    # Historical returns nothing new (netease T+1, eastmoney may also be empty)
+    fetcher._fetch_kline_with_fallback = lambda *args: (pd.DataFrame(), "none")
+    # Sina returns fresh today (14:31 price)
+    fetcher._fetch_kline_realtime_sina = lambda code: pd.DataFrame(
+        [{"date": today, "open": 8.20, "high": 9.05, "low": 8.26, "close": 8.77, "volume": 258276309, "amount": 2.26e9}]
+    )
+
+    df = fetcher.get_daily_kline("600909", yesterday, today, adjust="qfq")
+
+    today_row = df[df["date"] == today].iloc[0]
+    assert today_row["close"] == 8.77  # fresh sina price, not stale 8.92
 
 
 def test_get_daily_kline_falls_back_to_cached_snapshot(tmp_path):

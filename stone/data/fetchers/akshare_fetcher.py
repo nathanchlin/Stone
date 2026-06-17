@@ -232,12 +232,16 @@ class AkshareFetcher:
         end: date,
         today: date,
     ) -> pd.DataFrame:
-        """Append today's sina realtime quote if missing from merged, then return subset.
+        """Overwrite today's row with sina realtime quote when end >= today, then return subset.
 
-        netease daily kline is T+1 delayed (returns data through yesterday). This
-        merge ensures callers always see today's data when end >= today.
+        Why always overwrite: netease is T+1 delayed, eastmoney can return a stale
+        intraday snapshot, and the parquet cache may already contain today's row
+        written by an earlier run. Any of these can fool the previous "skip sina
+        if today already present" check into serving hours-old prices during
+        intraday monitoring (Bug C5 v2). Sina hq is the only authoritative
+        realtime source, so it wins whenever today is in the requested range.
         """
-        if end >= today and (merged.empty or merged["date"].max() < today):
+        if end >= today:
             sina_row = self._fetch_kline_realtime_sina(code)
             if not sina_row.empty and sina_row.iloc[0]["date"] == today:
                 merged = merged[merged["date"] != today]
